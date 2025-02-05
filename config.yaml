@@ -1,0 +1,101 @@
+global:
+  topic: >
+    Tool Use, the AI podcast
+  overview: >
+    Tool Use is a weekly AI conversation where we talk about AI tools you can use in your life today. It's a podcast on youtube and other major podcast providers. The goal is to get more people to subscribe on youtube, and to get people listening on spotify.
+
+  # Paths for context and conversation artifacts
+  context_folder: "./context/" # Folder containing markdown documentation & guidelines
+  unprocessed_folder: "./conversations/unprocessed/"
+  curated_folder: "./conversations/curated/"
+  processed_folder: "./conversations/processed/"
+
+  # General settings
+  max_tokens_per_day_for_small_models: 10000000
+  max_tokens_per_day_for_large_models: 1000000
+
+# Iteration & Loop Settings
+# ========================================s
+iteration:
+  infinite_mode: false # Set to true for endless processing cycles. WARNING!!! This could rack up a huge bill if you're not careful!!! plz be careful. It's not my fault if you mess this up.
+  stop_at_daily_token_limit: true # Set to true to stop at the daily OpenAI token limit
+  stop_at_n_number_of_conversations: 10 # Only works if infinite mode is off. Once we make and send this number of conversations, break the loop and exit.
+  num_conversations_per_batch: 5 # number of conversations per batch, this works best set low, between 5-20
+
+# ========================================
+# Submission Module Settings
+# ========================================
+submission:
+  model: "openai/gpt-4o"
+  # IMPORTANT! Use your training OpenAI key.
+  env_key: "TRAINING_OPENAI_API_KEY"
+  continue_conversation_for_n_messages: 1 # Set to more than 1 if you want the conversation to continue on.
+
+# ========================================
+
+# ========================================
+# Token Tracking Configuration
+# ========================================
+token_tracking:
+  tracking_file: "./logs/token_usage.json"
+  model_groups:
+    mini_models:
+      models: ["openai/gpt-4o-mini", "openai/o3-mini", "openai/o1-mini"]
+      daily_limit: 10000000 # 10M tokens shared between mini models
+      min_tokens_percent: 1 # Stop processing if less than 1% tokens remain
+    full_models:
+      models: ["gpt-4o", "o1"]
+      daily_limit: 1000000 # 1M tokens shared between full models
+      min_tokens_percent: 5 # Stop processing if less than 5% tokens remain
+  timezone: "UTC" # Use UTC for consistent time tracking
+
+# ========================================
+# Evaluation & Curation Settings
+# ========================================
+evaluation:
+  enabled: true
+  model: "openai/gpt-4o-mini"
+  env_key: "OPENAI_API_KEY"
+  cutoff_score: 85
+
+# ========================================
+
+# Architect Agent Configuration
+# ========================================
+architect_agent:
+  model: "openai/gpt-4o-mini" # Or use ollama_chat/deepseek-r1:70b for fully local!
+  env_key: "OPENAI_API_KEY"
+
+# ========================================
+# User Agent Configuration
+# ========================================
+user_agent:
+  model: "openai/gpt-4o-mini"
+  env_key: "OPENAI_API_KEY"
+
+# ========================================
+# System Agent Configuration
+# ========================================
+system_agent:
+  model: "openai/gpt-4o-mini"
+  env_key: "OPENAI_API_KEY"
+
+# Vector Database Settings (ChromaDB)
+# ========================================
+vector_db:
+  enabled: true
+  type: "ChromaDB"
+  index_name: "context_collection"
+  similarity_threshold: 0.75
+  embedding_model: "text-embedding-ada-002"
+  persist_directory: "./chroma_db"
+
+# ========================================
+# Logging Configuration
+# ========================================
+logging:
+  log_level: "DEBUG"
+  log_file: "./logs/pipeline.log"
+  rotation_size: "100 MB"
+  retention_days: 1000
+  compression: "zip"
