@@ -21,6 +21,7 @@ A pipeline for generating high-quality conversational content using multiple AI 
 
    - Place markdown files in the `context/` folder
    - Supports nested directories (e.g., `context/docs/api.md`, `context/guides/setup.md`)
+   - Admittedly, this is a very simple RAG implementation, feel free to modify context manager to optimize it for your needs.
 
 4. Run the pipeline:
    ```bash

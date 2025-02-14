@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from litellm import completion
 import litellm
 from src.utils.logger import log
+import time
 
 # Type variable for Pydantic model
 T = TypeVar('T', bound=BaseModel)
@@ -31,7 +32,7 @@ def structured_ai_response(
     response_model: Type[T],
     model: str,
     api_key: str,
-    token_tracker=None,  # Make tracker optional
+    token_tracker=None,
     max_retries: int = 3,
     timeout: int = 90,
 ) -> T:
@@ -61,6 +62,33 @@ def structured_ai_response(
     
     while retries <= max_retries:
         try:
+            # Check Gemini request limits before making call
+            if token_tracker and model.startswith("gemini/"):
+                if token_tracker.check_request_limit(model):
+                    # If we hit minute limit, wait and retry
+                    if retries < max_retries:
+                        wait_time = 75  # Wait 75 seconds to be safe
+                        log.info(f"😴 Rate limited, waiting {wait_time} seconds before retry...")
+                        time.sleep(wait_time)
+                        retries += 1
+                        continue
+                    else:
+                        # If we've retried max times, try switching models
+                        next_model = token_tracker.get_next_available_model(model)
+                        if next_model:
+                            log.info(f"🔄 Switching to {next_model} due to rate limits")
+                            return structured_ai_response(
+                                messages=messages,
+                                response_model=response_model,
+                                model=next_model,
+                                api_key=api_key,
+                                token_tracker=token_tracker,
+                                max_retries=max_retries,
+                                timeout=timeout
+                            )
+                        else:
+                            raise AIError("Rate limit exceeded and no alternative models available")
+
             if retries > 0:
                 log.info(f"🔄 Retry attempt {retries}/{max_retries}")
             
@@ -78,21 +106,48 @@ def structured_ai_response(
                 
             response = completion(**completion_args)
             
+            # Track the request for Gemini
+            if token_tracker and model.startswith("gemini/"):
+                token_tracker.track_request(model)
+
             log.success("\n✨ Successfully received AI response")
             
             # Track token usage if available and tracker exists
             if hasattr(response, 'usage') and token_tracker is not None:
                 usage = response.usage
-                prompt_tokens = usage.prompt_tokens
-                completion_tokens = usage.completion_tokens
-                total_tokens = prompt_tokens + completion_tokens
                 
-                log.info(f"📊 Token Usage: {total_tokens} tokens ({prompt_tokens} prompt, {completion_tokens} completion)")
-                
+                # Handle different token counting for Gemini
+                if model.startswith("gemini/"):
+                    # Gemini counts total tokens differently
+                    total_tokens = usage.total_tokens
+                    # Approximate split for Gemini (adjust ratio as needed)
+                    prompt_tokens = int(total_tokens * 0.6)
+                    completion_tokens = total_tokens - prompt_tokens
+                else:
+                    # OpenAI style token counting
+                    prompt_tokens = usage.prompt_tokens
+                    completion_tokens = usage.completion_tokens
+                    total_tokens = prompt_tokens + completion_tokens
+
                 # Check if we would exceed limits
                 if token_tracker.check_limit(model, total_tokens):
-                    raise AIError(f"Token limit would be exceeded for model {model}")
-                
+                    # Try to get next available model
+                    next_model = token_tracker.get_next_available_model(model)
+                    if next_model:
+                        log.info(f"🔄 Switching to {next_model} due to token limits")
+                        # Recursive call with new model
+                        return structured_ai_response(
+                            messages=messages,
+                            response_model=response_model,
+                            model=next_model,
+                            api_key=api_key,
+                            token_tracker=token_tracker,
+                            max_retries=max_retries,
+                            timeout=timeout
+                        )
+                    else:
+                        raise AIError(f"Token limit would be exceeded for model {model} and no alternatives available")
+
                 # Track the usage
                 token_tracker.track_usage(
                     model=model,
@@ -120,6 +175,34 @@ def structured_ai_response(
             
         except Exception as e:
             last_error = e
+            
+            # Handle Gemini rate limit errors
+            if (isinstance(e, litellm.APIError) and 
+                str(e).lower().find("resource_exhausted") >= 0 and
+                model.startswith("gemini/")):
+                
+                if retries < max_retries:
+                    wait_time = 75  # Wait 75 seconds to be safe
+                    log.info(f"😴 Rate limited, waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
+                    retries += 1
+                    continue
+                else:
+                    # Try switching models after max retries
+                    next_model = token_tracker.get_next_available_model(model)
+                    if next_model:
+                        log.info(f"🔄 Switching to {next_model} due to rate limits")
+                        return structured_ai_response(
+                            messages=messages,
+                            response_model=response_model,
+                            model=next_model,
+                            api_key=api_key,
+                            token_tracker=token_tracker,
+                            max_retries=max_retries,
+                            timeout=timeout
+                        )
+            
+            # Handle other errors
             retries += 1
             log.warning(f"⚠️  AI call attempt {retries} failed: {str(e)}")
             

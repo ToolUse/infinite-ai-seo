@@ -229,7 +229,7 @@ class Pipeline:
         return self.continue_conversation(conversation, blueprint, remaining_turns - 1)
 
     def process_curated_conversations(self):
-        """Process all curated conversations"""
+        """Process all conversations in the curated folder"""
         curated_dir = Path(self.config["global"]["curated_folder"])
         processed_dir = Path(self.config["global"]["processed_folder"])
         
@@ -238,14 +238,22 @@ class Pipeline:
         
         for conv_file in curated_dir.glob("*.json"):
             try:
-                # Load conversation
+                # Load the conversation
                 with open(conv_file, 'r') as f:
-                    conversation = ConversationSchema.model_validate_json(f.read())
+                    raw_messages = json.load(f)
                 
-                # Continue conversation if configured (this is now the submission)
+                # Convert raw messages to MessageSchema objects first
+                messages = [MessageSchema(**msg) for msg in raw_messages]
+                
+                # Create conversation object with the correct structure
+                conversation_data = {"conversation": messages}
+                conversation = ConversationSchema(**conversation_data)
+                
+                # Continue conversation if configured
                 n_messages = self.config["submission"]["continue_conversation_for_n_messages"]
                 if n_messages > 0:
                     conversation = self.continue_conversation(conversation, blueprint, n_messages)
+                    
                     # Save updated conversation back to file
                     with open(conv_file, 'w') as f:
                         messages = [msg.model_dump() for msg in conversation.conversation]
