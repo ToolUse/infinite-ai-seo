@@ -22,16 +22,14 @@ def init_app():
 
 @app.command()
 def run():
-    """Run the complete pipeline"""
+    """Run the complete pipeline continuously"""
     try:
-        log.info("Starting pipeline run")
+        log.info("Starting continuous pipeline run")
         pipeline = Pipeline()
+        pipeline.run_continuous()
         
-        log.info("Generating conversations from context...")
-        conversations = pipeline.run()
-        
-        log.success(f"Pipeline completed successfully! Generated {len(conversations)} conversations")
-        
+    except KeyboardInterrupt:
+        log.info("Pipeline stopped by user")
     except Exception as e:
         log.error(f"Pipeline failed: {str(e)}")
         log.exception("Detailed error traceback:")

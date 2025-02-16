@@ -18,11 +18,12 @@ from src.utils.logger import log
 class TokenTracker:
     def __init__(self, config):
         self.tracking_file = Path(config["token_tracking"]["tracking_file"])
-        self.model_groups = config["token_tracking"]["model_groups"]
+        self.model_tiers = config["model_tiers"]
         self.timezone = pytz.timezone(config["token_tracking"]["timezone"])
         self.stop_at_daily_token_limit = config["token_tracking"]["stop_at_daily_token_limit"]
         self.auto_switch = config["token_tracking"].get("auto_switch", False)
-        self.provider_priority = config["token_tracking"].get("provider_priority", ["openai", "gemini"])
+        self.providers_to_use = config["model_tiers"].get("providers_to_use", ["openai", "gemini"])
+        self.min_tokens_percent = config["token_tracking"].get("min_tokens_percent", 1)
         self._ensure_tracking_file()
         
         # Initialize request tracking for Gemini
@@ -33,18 +34,19 @@ class TokenTracker:
         return datetime.now(self.timezone).strftime("%Y-%m-%d")
         
     def _get_model_group(self, model: str) -> Tuple[str, int]:
-        """
-        Get the group name and limit for a given model.
-        
-        Returns:
-            Tuple of (group_name, daily_limit)
-        Raises:
-            ValueError if model not found in any group
-        """
-        for group_name, group_info in self.model_groups.items():
-            if model in group_info["models"]:
-                return group_name, group_info["daily_limit"]
-        raise ValueError(f"Model {model} not found in any configured group")
+        """Get the tier name and limit for a given model."""
+        for tier_name, tier_info in self.model_tiers.items():
+            tier_models = [
+                tier_info["architect_agent"],
+                tier_info["user_agent"],
+                tier_info["system_agent"],
+                tier_info["submission_model"]
+            ]
+            if model in tier_models:
+                # Return daily_token_limit for OpenAI, daily_request_limit for Gemini
+                limit = tier_info.get("daily_token_limit", tier_info.get("daily_request_limit", 0))
+                return tier_name, limit
+        raise ValueError(f"Model {model} not found in any tier")
         
     def _ensure_tracking_file(self) -> None:
         """Ensure the token tracking file exists with valid initial data."""
@@ -64,13 +66,13 @@ class TokenTracker:
                     "total_tokens": 0
                 },
                 "model_groups": {
-                    group_name: {
+                    tier_name: {
                         "daily_tokens": 0,
                         "lifetime_tokens": 0
                     }
-                    for group_name in self.model_groups.keys()
+                    for tier_name in self.model_tiers.keys()
                 },
-                "models": {},  # Keep individual model tracking for analytics
+                "models": {},
             }
             self._save_data(initial_data)
     
@@ -124,7 +126,7 @@ class TokenTracker:
         if would_exceed:
             log.error(f"⚠️  Adding {tokens} tokens would exceed daily limit of {limit} for group {group_name}")
             log.error(f"Current group usage: {current} tokens")
-            log.error(f"This affects models: {', '.join(self.model_groups[group_name]['models'])}")
+            log.error(f"This affects models: {', '.join(self.model_tiers[group_name]['models'])}")
         return would_exceed
     
     def _get_provider_from_model(self, model: str) -> str:
@@ -148,19 +150,19 @@ class TokenTracker:
         data = self._load_data()
         
         # Try providers in priority order
-        for provider in self.provider_priority:
+        for provider in self.providers_to_use:
             # Skip until we get to next provider after current
             if provider == current_provider:
                 continue
                 
             # Find models for this provider
             available_models = []
-            for group_name, group_info in self.model_groups.items():
+            for group_name, group_info in self.model_tiers.items():
                 for model in group_info["models"]:
                     if model.startswith(f"{provider}/"):
                         # Check if model has tokens available
                         group_usage = data["model_groups"][group_name]["daily_tokens"]
-                        if group_usage < group_info["daily_limit"]:
+                        if group_usage < group_info["daily_token_limit"]:
                             available_models.append(model)
                             
             if available_models:
@@ -255,53 +257,40 @@ class TokenTracker:
         except ValueError:
             pass
             
-    def has_sufficient_tokens(self, model: str, estimated_tokens: Optional[int] = None) -> bool:
-        """
-        Check if we have sufficient tokens remaining.
-        
-        Args:
-            model: The model to check
-            estimated_tokens: Optional estimate of tokens needed. If not provided, will just check against minimum threshold.
-            
-        Returns:
-            bool: True if we have sufficient tokens, False otherwise
-        """
-        try:
-            group_name, limit = self._get_model_group(model)
-            group_info = self.model_groups[group_name]
-            min_percent = group_info["min_tokens_percent"]
-            
-            data = self._load_data()
-            current_usage = data["model_groups"][group_name]["daily_tokens"]
-            remaining_tokens = limit - current_usage
-            remaining_percent = (remaining_tokens / limit) * 100
-            
-            # If estimated tokens provided, check if we have enough
-            if estimated_tokens is not None:
-                if estimated_tokens > remaining_tokens:
-                    log.error(f"⚠️  Insufficient tokens for estimated usage:")
-                    log.error(f"  Estimated tokens needed: {estimated_tokens:,}")
-                    log.error(f"  Remaining tokens: {remaining_tokens:,}")
-                    return False
-            
-            # Check if we're below minimum threshold
-            if remaining_percent < min_percent:
-                log.error(f"⚠️  Token usage for {group_name} is too high to start new request:")
-                log.error(f"  Current usage: {current_usage:,}/{limit:,} tokens")
-                log.error(f"  Remaining: {remaining_percent:.1f}% (minimum {min_percent}% required)")
-                log.error(f"  This affects models: {', '.join(group_info['models'])}")
-                
-                if self.stop_at_daily_token_limit:
-                    log.error("stop_at_daily_token_limit is enabled - will not continue with paid tokens")
-                else:
-                    log.warning("stop_at_daily_token_limit is disabled - will continue with paid tokens if needed")
-                return not self.stop_at_daily_token_limit
-            
+    def has_sufficient_tokens(self, model: str) -> bool:
+        """Check if there are sufficient tokens available for the model"""
+        if not self.stop_at_daily_token_limit:
             return True
             
+        try:
+            tier_name, limit = self._get_model_group(model)
+            usage = self.get_daily_usage(model)
+            remaining_percent = ((limit - usage) / limit) * 100
+            return remaining_percent >= self.min_tokens_percent
         except ValueError:
             log.warning(f"No limit configured for model {model} - allowing usage")
             return True
+
+    def has_sufficient_requests(self, model: str) -> bool:
+        """Check if there are sufficient API requests available (for Gemini)"""
+        if not model.startswith("gemini/"):
+            return True
+            
+        try:
+            tier_name, _ = self._get_model_group(model)
+            tier_info = self.model_tiers[tier_name]
+            if "requests_per_minute" in tier_info:
+                daily_requests = self.get_daily_requests(model)
+                return daily_requests < tier_info["daily_request_limit"]
+        except ValueError:
+            log.warning(f"No request limits configured for model {model}")
+        return True
+
+    def get_daily_requests(self, model: str) -> int:
+        """Get number of requests made today for a model"""
+        today = self._get_current_date()
+        data = self._load_data()
+        return data.get("request_tracking", {}).get("gemini", {}).get("daily", {}).get("count", 0)
 
     def _ensure_request_tracking(self) -> None:
         """Ensure request tracking data exists"""
@@ -350,9 +339,9 @@ class TokenTracker:
             }
         
         # Get limits from config
-        group_name = next(name for name, info in self.model_groups.items() 
+        group_name = next(name for name, info in self.model_tiers.items() 
                          if model in info["models"])
-        limits = self.model_groups[group_name]["request_limits"]
+        limits = self.model_tiers[group_name]["request_limits"]
         
         # Check limits
         if request_data["minute"]["count"] >= limits["requests_per_minute"]:
@@ -379,6 +368,11 @@ class TokenTracker:
         request_data["daily"]["count"] += 1
         
         self._save_data(data)
+
+    def get_daily_usage(self, model: str) -> int:
+        """Get daily token usage for a model"""
+        data = self._load_data()
+        return data.get("models", {}).get(model, {}).get("daily_tokens", 0)
 
 # Create a global instance (initialized with config in pipeline.py)
 tracker = None 

@@ -54,6 +54,8 @@ class ContextManager:
         Returns:
             List of text chunks with overlap
         """
+        chunk_size = self.config.get("chunk_size", 600)
+        overlap_percentage = self.config.get("chunk_overlap_percentage", 0.15)
         # Encode the text into tokens
         tokens = self.tokenizer.encode(text)
         

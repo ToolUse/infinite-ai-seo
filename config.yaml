@@ -1,65 +1,66 @@
 global:
+  # The topic used across prompts, this should be short and sweet
   topic: >
     Tool Use, the AI podcast
+  # The overview of what your product/topic is, give as much detail as you'd like in here
   overview: >
     Tool Use is a weekly AI conversation where we talk about AI tools you can use in your life today. It's a podcast on youtube and other major podcast providers. The goal is to get more people to subscribe on youtube, and to get people listening on spotify.
 
-  # Paths for context and conversation artifacts
-  context_folder: "./context/" # Folder containing markdown documentation & guidelines
-  unprocessed_folder: "./conversations/unprocessed/"
-  curated_folder: "./conversations/curated/"
-  processed_folder: "./conversations/processed/"
-
   # General settings
-  max_tokens_per_day_for_small_models: 10000000
-  max_tokens_per_day_for_large_models: 1000000
-
-# Iteration & Loop Settings
-# ========================================
-iteration:
-  infinite_mode: false # Set to true for endless processing cycles. WARNING!!! This could rack up a huge bill if you're not careful!!! plz be careful. It's not my fault if you mess this up.
-  stop_at_n_number_of_conversations: 10 # Only works if infinite mode is off. Once we make and send this number of conversations, break the loop and exit.
-  num_conversations_per_batch: 5 # number of conversations per batch, this works best set low, between 5-20
+  wait_time_between_runs: 86400 # 24 hours in seconds
+  continue_conversation_for_n_messages: 1 # Set to more than 1 if you want the conversation to continue on artificially before submitting
 
 # ========================================
-# Submission Module Settings
+# Model configuration
 # ========================================
-submission:
-  model: "openai/gpt-4o"
-  # IMPORTANT! Use your training OpenAI key.
-  env_key: "TRAINING_OPENAI_API_KEY"
-  continue_conversation_for_n_messages: 1 # Set to more than 1 if you want the conversation to continue on.
+model_tiers:
+  providers_to_use: ["gemini", "openai"] # The order matters. Remove a provider if you dont want to use it here.
+  mini_models:
+    enabled: true
+    architect_agent: "openai/gpt-4o-mini"
+    user_agent: "openai/gpt-4o-mini"
+    system_agent: "openai/gpt-4o-mini"
+    submission_model: "openai/gpt-4o"
+    daily_token_limit: 100000
+    # daily_token_limit: 10000000
+    env_key: "TRAINING_OPENAI_API_KEY"
+    submission_env_key: "TRAINING_OPENAI_API_KEY"
+
+  full_models:
+    enabled: true
+    architect_agent: "openai/gpt-4o"
+    user_agent: "openai/gpt-4o"
+    system_agent: "openai/gpt-4o"
+    submission_model: "openai/gpt-4o"
+    daily_token_limit: 100000
+    # daily_token_limit: 1000000
+    env_key: "TRAINING_OPENAI_API_KEY"
+    submission_env_key: "TRAINING_OPENAI_API_KEY"
+
+  gemini_models:
+    enabled: true
+    architect_agent: "gemini/gemini-2.0-flash"
+    user_agent: "gemini/gemini-2.0-flash"
+    system_agent: "gemini/gemini-2.0-flash"
+    submission_model: "gemini/gemini-2.0-flash"
+    daily_request_limit: 20
+    # daily_request_limit: 1500
+    requests_per_minute: 15
+    env_key: "GEMINI_API_KEY"
+    submission_env_key: "TRAINING_OPENAI_API_KEY"
 
 # ========================================
-
-# ========================================
-# Token Tracking Configuration
+# Token Tracking configuration
 # ========================================
 token_tracking:
   tracking_file: "./logs/token_usage.json"
   stop_at_daily_token_limit: true
-  model_groups:
-    mini_models:
-      models: ["openai/gpt-4o-mini", "openai/o3-mini", "openai/o1-mini"]
-      daily_limit: 10000000 # 10M tokens shared between mini models
-      min_tokens_percent: 1 # Stop processing if less than 1% tokens remain
-    full_models:
-      models: ["gpt-4o", "o1"]
-      daily_limit: 1000000 # 1M tokens shared between full models
-      min_tokens_percent: 5 # Stop processing if less than 5% tokens remain
-    gemini_models:
-      models: ["gemini/gemini-2.0-flash"]
-      daily_limit: 60000000 # We'll keep token tracking for visibility
-      min_tokens_percent: 1
-      request_limits: # New section for Gemini request limits
-        requests_per_minute: 15
-        requests_per_day: 1500
   auto_switch: true
-  provider_priority: ["openai", "gemini"]
   timezone: "UTC"
+  min_tokens_percent: 1 # Stops when this percentage of the daily tokens remains
 
 # ========================================
-# Evaluation & Curation Settings
+# Evals configuration
 # ========================================
 evaluation:
   enabled: true
@@ -68,33 +69,13 @@ evaluation:
   cutoff_score: 85
 
 # ========================================
-
-# Architect Agent Configuration
-# ========================================
-architect_agent:
-  model: "openai/gpt-4o-mini" # Or use ollama_chat/deepseek-r1:70b for fully local!
-  env_key: "TRAINING_OPENAI_API_KEY"
-
-# ========================================
-# User Agent Configuration
-# ========================================
-user_agent:
-  model: "openai/gpt-4o-mini"
-  env_key: "TRAINING_OPENAI_API_KEY"
-
-# ========================================
-# System Agent Configuration
-# ========================================
-system_agent:
-  model: "openai/gpt-4o-mini"
-  env_key: "TRAINING_OPENAI_API_KEY"
-
-# Vector Database Settings (ChromaDB)
+# Vector DB configuration
 # ========================================
 vector_db:
   enabled: true
-  type: "ChromaDB"
   index_name: "context_collection"
+  chunk_size: 600
+  chunk_overlap_percentage: 15
   similarity_threshold: 0.7
   embedding_model: "text-embedding-ada-002"
   persist_directory: "./chroma_db"
@@ -108,3 +89,12 @@ logging:
   rotation_size: "100 MB"
   retention_days: 1000
   compression: "zip"
+
+  # ========================================
+  # Paths for context and conversation artifacts, you shouldn't have to mess with this
+  # ========================================
+directories:
+  context_folder: "./context/" # Folder containing markdown documentation & guidelines
+  unprocessed_folder: "./conversations/unprocessed/"
+  curated_folder: "./conversations/curated/"
+  processed_folder: "./conversations/processed/"
