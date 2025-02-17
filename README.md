@@ -138,6 +138,8 @@ For Google:
 
 - If you really wanted to go through tokens, you could probably modify this repo so that it rotates through gemini models after it runs out of requests for one model. I don't have this set up, but it shouldn't be too difficult to add.
 
+- The xAI Grok API has an option for data collection too, and $150 in free credits each month if you opt in. I haven't added it yet, if you feel compelled to add it please make a PR!
+
 ## FAQ
 
 - **Is this free to use?**
