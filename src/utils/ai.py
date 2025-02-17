@@ -19,6 +19,7 @@ from litellm import completion
 import litellm
 from src.utils.logger import log
 import time
+from litellm.exceptions import RateLimitError
 
 # Type variable for Pydantic model
 T = TypeVar('T', bound=BaseModel)
@@ -31,11 +32,11 @@ def structured_ai_response(
     messages: List[Dict[str, str]],
     response_model: Type[T],
     model: str,
-    api_key: str,
+    api_key: str | None = None,
     token_tracker=None,
     max_retries: int = 3,
     timeout: int = 90,
-) -> T:
+) -> T | None:
     """
     Make an AI call and return a structured response using a Pydantic model.
     
@@ -49,7 +50,7 @@ def structured_ai_response(
         timeout: Request timeout in seconds
         
     Returns:
-        Instance of the provided Pydantic model
+        Instance of the provided Pydantic model or None if no valid response
         
     Raises:
         AIError: If the AI call fails or response validation fails
@@ -57,38 +58,73 @@ def structured_ai_response(
     retries = 0
     last_error = None
     
+    # If no api_key provided, get it from the token tracker's config
+    if api_key is None and token_tracker is not None:
+        provider = model.split('/')[0]
+        model_tiers = token_tracker.model_tiers
+        
+        # Find the tier containing this model
+        for tier_name, tier_info in model_tiers.items():
+            if tier_name in ["tier_order"]:
+                continue
+            if not isinstance(tier_info, dict):
+                continue
+                
+            tier_models = [
+                tier_info.get("architect_agent"),
+                tier_info.get("user_agent"),
+                tier_info.get("system_agent"),
+                tier_info.get("submission_model")
+            ]
+            
+            if model in tier_models:
+                env_key = tier_info.get("env_key")
+                if env_key:
+                    api_key = os.getenv(env_key)
+                    if not api_key:
+                        raise EnvironmentError(f"Missing API key: {env_key}")
+                    break
+        
+        if not api_key:
+            raise ValueError(f"Could not find tier configuration for model: {model}")
+    
     log.info(f"\n🤖 Making call to {model}")
     log.debug(f"  Config: max_retries={max_retries}, timeout={timeout}s")
     
     while retries <= max_retries:
         try:
-            # Check Gemini request limits before making call
-            if token_tracker and model.startswith("gemini/"):
-                if token_tracker.check_request_limit(model):
-                    # If we hit minute limit, wait and retry
-                    if retries < max_retries:
-                        wait_time = 75  # Wait 75 seconds to be safe
-                        log.info(f"😴 Rate limited, waiting {wait_time} seconds before retry...")
-                        time.sleep(wait_time)
-                        retries += 1
-                        continue
+            # Check if we've hit token/request limits
+            if token_tracker:
+                if model.startswith("gemini/") and token_tracker.check_request_limit(model):
+                    next_model = token_tracker.get_next_available_model(model)
+                    if next_model:
+                        log.info(f"🔄 Switching to {next_model} due to Gemini daily request limit")
+                        # Update the token tracker's current tier
+                        for tier_name, tier_info in token_tracker.model_tiers.items():
+                            if tier_name in ["tier_order"]:
+                                continue
+                            if not isinstance(tier_info, dict):
+                                continue
+                            if next_model in [
+                                tier_info.get("architect_agent"),
+                                tier_info.get("user_agent"),
+                                tier_info.get("system_agent"),
+                                tier_info.get("submission_model")
+                            ]:
+                                token_tracker.switch_tier(tier_name)
+                                break
+                        return structured_ai_response(
+                            messages=messages,
+                            response_model=response_model,
+                            model=next_model,
+                            token_tracker=token_tracker,
+                            max_retries=max_retries,
+                            timeout=timeout
+                        )
                     else:
-                        # If we've retried max times, try switching models
-                        next_model = token_tracker.get_next_available_model(model)
-                        if next_model:
-                            log.info(f"🔄 Switching to {next_model} due to rate limits")
-                            return structured_ai_response(
-                                messages=messages,
-                                response_model=response_model,
-                                model=next_model,
-                                api_key=api_key,
-                                token_tracker=token_tracker,
-                                max_retries=max_retries,
-                                timeout=timeout
-                            )
-                        else:
-                            raise AIError("Rate limit exceeded and no alternative models available")
-
+                        log.error("❌ All models have reached their limits. Stopping pipeline.")
+                        return None
+            
             if retries > 0:
                 log.info(f"🔄 Retry attempt {retries}/{max_retries}")
             
@@ -135,18 +171,18 @@ def structured_ai_response(
                     next_model = token_tracker.get_next_available_model(model)
                     if next_model:
                         log.info(f"🔄 Switching to {next_model} due to token limits")
-                        # Recursive call with new model
+                        # Remove api_key from args to force Pipeline to get the correct one
                         return structured_ai_response(
                             messages=messages,
                             response_model=response_model,
                             model=next_model,
-                            api_key=api_key,
                             token_tracker=token_tracker,
                             max_retries=max_retries,
                             timeout=timeout
                         )
                     else:
-                        raise AIError(f"Token limit would be exceeded for model {model} and no alternatives available")
+                        log.error("❌ All models have reached their token limits. Stopping pipeline.")
+                        return None  # Return None instead of raising error
 
                 # Track the usage
                 token_tracker.track_usage(
@@ -177,13 +213,13 @@ def structured_ai_response(
             last_error = e
             
             # Handle Gemini rate limit errors
-            if (isinstance(e, litellm.APIError) and 
-                str(e).lower().find("resource_exhausted") >= 0 and
-                model.startswith("gemini/")):
+            if (isinstance(e, RateLimitError) and 
+                model.startswith("gemini/") and
+                "RESOURCE_EXHAUSTED" in str(e)):
                 
                 if retries < max_retries:
                     wait_time = 75  # Wait 75 seconds to be safe
-                    log.info(f"😴 Rate limited, waiting {wait_time} seconds before retry...")
+                    log.info(f"😴 Rate limited by Gemini, waiting {wait_time} seconds before retry...")
                     time.sleep(wait_time)
                     retries += 1
                     continue
@@ -196,7 +232,6 @@ def structured_ai_response(
                             messages=messages,
                             response_model=response_model,
                             model=next_model,
-                            api_key=api_key,
                             token_tracker=token_tracker,
                             max_retries=max_retries,
                             timeout=timeout

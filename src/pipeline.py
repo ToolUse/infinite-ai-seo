@@ -38,10 +38,10 @@ class Pipeline:
             
         # Initialize token tracker
         global tracker
-        if tracker is None:
-            tracker = TokenTracker(self.config)
-            log.info("🔄 Token tracker initialized")
-            
+        tracker = TokenTracker(self.config)
+        self.tracker = tracker
+        log.info("🔄 Token tracker initialized")
+        
         # Initialize context manager
         self.context_manager = ContextManager(
             context_dir=self.config["directories"]["context_folder"],
@@ -54,8 +54,8 @@ class Pipeline:
         # Add the validation call to __init__
         self._validate_config()
         
-        # Track current model tier
-        self.current_tier = "mini_models"
+        # Track current model tier - use first tier from config
+        self.current_tier = self.config["model_tiers"]["tier_order"][0]
     
     def _setup_directories(self):
         """Create necessary directories if they don't exist"""
@@ -71,25 +71,29 @@ class Pipeline:
             log.debug(f"Creating directory: {dir_path}")
             Path(dir_path).mkdir(parents=True, exist_ok=True)
 
-    def generate_blueprint(self) -> BlueprintSchema:
+    def generate_blueprint(self) -> Optional[BlueprintSchema]:
         """Generate blueprint using architect agent"""
         models = self._get_current_models()
         env_key = models["env_key"]
         log.info(f"Using {env_key} for architect agent")
         api_key = self._get_api_key(env_key)
 
-        messages = [
-            format_system_prompt(ARCHITECT_SYSTEM_PROMPT, topic=self.config["global"]["topic"]),
-            format_user_prompt(ARCHITECT_USER_PROMPT, overview=self.config["global"]["overview"], topic=self.config["global"]["topic"])
-        ]
-        
-        return structured_ai_response(
-            messages=messages,
+        result = structured_ai_response(
+            messages=[
+                format_system_prompt(ARCHITECT_SYSTEM_PROMPT, topic=self.config["global"]["topic"]),
+                format_user_prompt(ARCHITECT_USER_PROMPT, overview=self.config["global"]["overview"], topic=self.config["global"]["topic"])
+            ],
             response_model=BlueprintSchema,
             model=models["architect_agent"],
             api_key=api_key,
-            token_tracker=tracker
+            token_tracker=self.tracker
         )
+        
+        if result is None:
+            log.warning("🛑 Could not generate blueprint - all models exhausted")
+            return None
+        
+        return result
 
     def generate_user_queries(self, blueprint: BlueprintSchema) -> List[str]:
         """Generate multiple user queries in a single request"""
@@ -117,7 +121,7 @@ class Pipeline:
         
         return result.queries
 
-    def generate_conversation(self, query: str, blueprint: BlueprintSchema) -> ConversationSchema:
+    def generate_conversation(self, query: str, blueprint: BlueprintSchema) -> Optional[ConversationSchema]:
         """Generate conversation response using system agent"""
         models = self._get_current_models()
         env_key = models["env_key"]
@@ -141,7 +145,12 @@ class Pipeline:
             api_key=api_key,
             token_tracker=tracker
         )
-
+        
+        # Check if we got a valid response
+        if response is None:
+            log.error("Failed to generate AI response - token limits reached")
+            return None
+        
         return ConversationSchema(conversation=[initial_message, response])
 
     def evaluate_conversation(self, conversation: ConversationSchema) -> EvaluationSchema:
@@ -254,11 +263,13 @@ class Pipeline:
 
     def _get_current_models(self) -> Dict[str, str]:
         """Get current model configuration based on tier"""
-        return self.config["model_tiers"][self.current_tier]
+        current_tier = self.tracker.get_current_tier()  # Use tracker's tier
+        return self.config["model_tiers"][current_tier]
     
     def _switch_model_tier(self) -> bool:
         """Switch to next available model tier. Returns False if no tiers available."""
-        tier_order = ["mini_models", "full_models", "gemini_models"]
+        # Use tier_order from config instead of hardcoded list
+        tier_order = self.config["model_tiers"]["tier_order"]
         try:
             current_index = tier_order.index(self.current_tier)
             if current_index + 1 < len(tier_order):
@@ -273,10 +284,9 @@ class Pipeline:
         """Check if current tier has available tokens"""
         models = self._get_current_models()
         if "daily_token_limit" in models:
-            return tracker.has_sufficient_tokens(models["system_agent"])
+            return self.tracker.has_sufficient_tokens(models["system_agent"])
         elif "daily_request_limit" in models:
-            # Handle Gemini request limits
-            return tracker.has_sufficient_requests(models["system_agent"])
+            return self.tracker.has_sufficient_requests(models["system_agent"])
         return False
 
     def run_continuous(self):
@@ -307,13 +317,33 @@ class Pipeline:
                         wait_time = self.config["global"]["wait_time_between_runs"]
                         log.info(f"All model tiers exhausted. Waiting {wait_time/3600} hours...")
                         sleep(wait_time)
-                        self.current_tier = "mini_models"  # Reset to mini models
+                        self.current_tier = self.config["model_tiers"]["tier_order"][0]  # Reset to first tier
                         continue
 
                 # Generate single conversation
                 blueprint = self.generate_blueprint()
+                if blueprint is None:
+                    # All models exhausted, wait and try again
+                    wait_time = self.config["global"]["wait_time_between_runs"]
+                    print("\n\n\n")
+                    log.info(f"🔄 All models exhausted. Waiting {wait_time/3600} hours before trying again...")
+                    sleep(wait_time)
+                    # Reset to first tier
+                    self.current_tier = self.config["model_tiers"]["tier_order"][0]
+                    continue
+                
                 query = self.generate_single_query(blueprint)
                 conversation = self.generate_conversation(query, blueprint)
+                
+                # Check if conversation generation failed
+                if conversation is None:
+                    # All models exhausted, wait and try again
+                    wait_time = self.config["global"]["wait_time_between_runs"]
+                    log.info(f"🔄 All models exhausted. Waiting {wait_time/3600} hours before trying again...")
+                    sleep(wait_time)
+                    # Reset to first tier
+                    self.current_tier = self.config["model_tiers"]["tier_order"][0]
+                    continue
                 
                 # Evaluate and process
                 evaluation = self.evaluate_conversation(conversation)
@@ -365,7 +395,14 @@ class Pipeline:
         """Save conversation to appropriate directory"""
         folder = Path(self.config["directories"]["curated_folder"] if passed 
                      else self.config["directories"]["unprocessed_folder"])
-        conv_file = folder / f"conversation_{uuid.uuid4()}.json"
+        
+        # Get current model and make it file-safe
+        current_model = self._get_current_models()["system_agent"]
+        model_name = current_model.replace('/', '_').replace(':', '-')
+        
+        # Create filename with model info and timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        conv_file = folder / f"convo_{model_name}_{timestamp}.json"
         
         with open(conv_file, 'w') as f:
             messages = [msg.model_dump() for msg in conversation.conversation]
@@ -395,6 +432,14 @@ class Pipeline:
         # Validate model tier configurations
         required_tier_keys = ["architect_agent", "user_agent", "system_agent", "submission_model", "env_key"]
         for tier_name, tier_info in self.config["model_tiers"].items():
+            # Skip non-tier configuration keys
+            if tier_name in ["tier_order", "providers_to_use"]:
+                continue
+            
+            # Skip disabled tiers
+            if not tier_info.get("enabled", True):
+                continue
+            
             for key in required_tier_keys:
                 if key not in tier_info:
                     raise ValueError(f"Missing {key} in {tier_name} configuration")
@@ -407,7 +452,15 @@ class Pipeline:
 
     def _get_api_key(self, env_key: str) -> str:
         """Safely get API key from environment"""
-        api_key = os.getenv(env_key)
+        # Get current model tier info
+        tier_info = self._get_current_models()
+        
+        # If this is a submission model, use submission_env_key
+        if env_key == tier_info.get("submission_env_key"):
+            api_key = os.getenv(tier_info["submission_env_key"])
+        else:
+            api_key = os.getenv(tier_info["env_key"])
+        
         if not api_key:
             raise EnvironmentError(f"Missing API key: {env_key}")
         return api_key 

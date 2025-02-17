@@ -4,50 +4,51 @@ global:
     Tool Use, the AI podcast
   # The overview of what your product/topic is, give as much detail as you'd like in here
   overview: >
-    Tool Use is a weekly AI conversation where we talk about AI tools you can use in your life today. It's a podcast on youtube and other major podcast providers. The goal is to get more people to subscribe on youtube, and to get people listening on spotify.
+    Tool Use is a weekly AI conversation where we talk about AI tools you can use in your life today. It's a podcast on youtube and other major podcast providers. The goal is to get more people to subscribe on youtube, and to get people listening on spotify. The two hosts are Ty Fiero and Mike Bird.
 
   # General settings
-  wait_time_between_runs: 86400 # 24 hours in seconds
+  enable_infinite_mode: true # Run pipeline infinitely
+  wait_time_between_runs: 86400 # If infinite mode is on, it will wait this long before running the pipeline again  (this is 24 hours in seconds)
   continue_conversation_for_n_messages: 1 # Set to more than 1 if you want the conversation to continue on artificially before submitting
 
 # ========================================
 # Model configuration
 # ========================================
 model_tiers:
-  providers_to_use: ["gemini", "openai"] # The order matters. Remove a provider if you dont want to use it here.
-  mini_models:
+  tier_order: ["gemini_models", "openai_mini_models", "openai_large_models"] # The order matters, the first listed runs first. Remove a tier if you don't want to use it, or set enabled to false
+  openai_mini_models:
     enabled: true
+    provider: "openai"
     architect_agent: "openai/gpt-4o-mini"
     user_agent: "openai/gpt-4o-mini"
     system_agent: "openai/gpt-4o-mini"
-    submission_model: "openai/gpt-4o"
-    daily_token_limit: 100000
-    # daily_token_limit: 10000000
-    env_key: "TRAINING_OPENAI_API_KEY"
-    submission_env_key: "TRAINING_OPENAI_API_KEY"
+    submission_model: "openai/gpt-4o-mini"
+    daily_token_limit: 1000000 # Defaults to 1,000,000 tokens a day.
+    env_key: "DATA_SHARING_OPENAI_API_KEY"
+    submission_env_key: "DATA_SHARING_OPENAI_API_KEY"
 
-  full_models:
+  openai_large_models:
     enabled: true
+    provider: "openai"
     architect_agent: "openai/gpt-4o"
     user_agent: "openai/gpt-4o"
     system_agent: "openai/gpt-4o"
     submission_model: "openai/gpt-4o"
-    daily_token_limit: 100000
-    # daily_token_limit: 1000000
-    env_key: "TRAINING_OPENAI_API_KEY"
-    submission_env_key: "TRAINING_OPENAI_API_KEY"
+    daily_token_limit: 100000 # Set to 100,000 by default. Increase if you want more conversations from the big models
+    env_key: "DATA_SHARING_OPENAI_API_KEY"
+    submission_env_key: "DATA_SHARING_OPENAI_API_KEY"
 
   gemini_models:
     enabled: true
+    provider: "gemini"
     architect_agent: "gemini/gemini-2.0-flash"
     user_agent: "gemini/gemini-2.0-flash"
     system_agent: "gemini/gemini-2.0-flash"
     submission_model: "gemini/gemini-2.0-flash"
-    daily_request_limit: 20
-    # daily_request_limit: 1500
+    daily_request_limit: 1500
     requests_per_minute: 15
-    env_key: "GEMINI_API_KEY"
-    submission_env_key: "TRAINING_OPENAI_API_KEY"
+    env_key: "DATA_SHARING_GEMINI_API_KEY"
+    submission_env_key: "DATA_SHARING_GEMINI_API_KEY"
 
 # ========================================
 # Token Tracking configuration
@@ -60,12 +61,12 @@ token_tracking:
   min_tokens_percent: 1 # Stops when this percentage of the daily tokens remains
 
 # ========================================
-# Evals configuration
+# Eval configuration
 # ========================================
 evaluation:
   enabled: true
   model: "openai/gpt-4o-mini"
-  env_key: "TRAINING_OPENAI_API_KEY"
+  env_key: "DATA_SHARING_OPENAI_API_KEY"
   cutoff_score: 85
 
 # ========================================
@@ -73,10 +74,12 @@ evaluation:
 # ========================================
 vector_db:
   enabled: true
-  index_name: "context_collection"
   chunk_size: 600
   chunk_overlap_percentage: 15
+  n_results: 3 # number of results to return per query
   similarity_threshold: 0.7
+  index_name: "context_collection"
+  embedding_api_key: "DATA_SHARING_OPENAI_API_KEY"
   embedding_model: "text-embedding-ada-002"
   persist_directory: "./chroma_db"
 

@@ -4,9 +4,14 @@ from typing import List, Optional, Dict
 
 import chromadb
 from chromadb.config import Settings
-from chromadb.utils import embedding_functions
+import chromadb.utils.embedding_functions as embedding_functions
+
 import tiktoken
 from src.utils.logger import log
+import logging
+
+# Configure ChromaDB logging at module level
+logging.getLogger('chromadb').setLevel(logging.WARNING)
 
 class ContextManager:
     def __init__(self, context_dir: str, config: Optional[Dict] = None):
@@ -26,8 +31,13 @@ class ContextManager:
         
         # Use OpenAI embeddings as specified in config
         log.info("Setting up OpenAI embeddings...")
+        embedding_api_key = self.config.get("vector_db", {}).get("embedding_api_key")
+        api_key = os.getenv(embedding_api_key)
+        if not api_key:
+            raise EnvironmentError(f"Missing API key: {embedding_api_key}")
+
         self.embedding_function = embedding_functions.OpenAIEmbeddingFunction(
-            api_key=os.getenv("OPENAI_API_KEY"),
+            api_key=api_key,
             model_name=db_config.get("embedding_model", "text-embedding-ada-002")
         )
         
@@ -123,8 +133,11 @@ class ContextManager:
         
         log.success("Document indexing completed")
 
-    def query_context(self, query: str, n_results: int = 3) -> List[str]:
+    def query_context(self, query: str, n_results: Optional[int] = None) -> List[str]:
         """Query the vector database for relevant context chunks."""
+        if n_results is None:
+            n_results = self.config.get("vector_db", {}).get("n_results", 3)
+        
         log.info(f"Querying context: '{query[:50]}...' (n_results={n_results})")
         try:
             results = self.collection.query(
@@ -132,16 +145,28 @@ class ContextManager:
                 n_results=n_results
             )
             
-            log.debug(f"Found {len(results['documents'][0])} matching chunks")
+            # Safely handle results
+            if not results or 'documents' not in results or not results['documents']:
+                log.warning("No matching documents found")
+                return []
             
-            # Print out the found chunks
-            for i, chunk in enumerate(results['documents'][0]):
-                log.info(f"\nChunk {i+1}:")
+            documents = results['documents'][0]  # First query's results
+            if not documents:
+                log.warning("No chunks found in results")
+                return []
+            
+            log.debug(f"Found {len(documents)} matching chunks")
+            
+            # Print out chunk previews
+            for i, chunk in enumerate(documents):
+                preview = chunk[:200] + "..." if len(chunk) > 200 else chunk
+                log.info(f"\nChunk {i+1} preview:")
                 log.info("=" * 40)
-                log.info(chunk)
+                log.info(preview)
                 log.info("=" * 40)
-                
-            return results['documents'][0]  # Return just the documents
+            
+            return documents
+        
         except Exception as e:
             log.error(f"Context query failed: {str(e)}")
             return []
@@ -152,7 +177,11 @@ class ContextManager:
         
         try:
             log.info("Clearing existing index...")
-            self.collection.delete(where={})
+            # Get all document IDs
+            all_ids = self.collection.get()["ids"]
+            if all_ids:
+                # Delete all documents if there are any
+                self.collection.delete(ids=all_ids)
             
             log.info("Reindexing documents...")
             self.index_documents()
@@ -161,4 +190,4 @@ class ContextManager:
             
         except Exception as e:
             log.error(f"Reindexing failed: {str(e)}")
-            raise 
+            raise

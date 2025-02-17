@@ -22,20 +22,33 @@ class TokenTracker:
         self.timezone = pytz.timezone(config["token_tracking"]["timezone"])
         self.stop_at_daily_token_limit = config["token_tracking"]["stop_at_daily_token_limit"]
         self.auto_switch = config["token_tracking"].get("auto_switch", False)
-        self.providers_to_use = config["model_tiers"].get("providers_to_use", ["openai", "gemini"])
+        self.tier_order = self.model_tiers.get("tier_order", [ "gemini_models", "openai_mini_models", "openai_large_models"])
         self.min_tokens_percent = config["token_tracking"].get("min_tokens_percent", 1)
+        self.current_tier = self.model_tiers.get("tier_order", [])[0]
         self._ensure_tracking_file()
         
         # Initialize request tracking for Gemini
         self._ensure_request_tracking()
         
-    def _get_current_date(self) -> str:
-        """Get current date in configured timezone."""
-        return datetime.now(self.timezone).strftime("%Y-%m-%d")
+    def _get_current_datetime(self) -> str:
+        """Get current datetime in configured timezone with ISO format."""
+        return datetime.now(self.timezone).isoformat()
         
     def _get_model_group(self, model: str) -> Tuple[str, int]:
         """Get the tier name and limit for a given model."""
         for tier_name, tier_info in self.model_tiers.items():
+            # Skip non-tier configuration keys
+            if tier_name in ["tier_order"]:  # Skip configuration keys
+                continue
+            
+            # Skip if not a dictionary (like tier_order list)
+            if not isinstance(tier_info, dict):
+                continue
+            
+            # Skip disabled tiers
+            if not tier_info.get("enabled", True):
+                continue
+            
             tier_models = [
                 tier_info["architect_agent"],
                 tier_info["user_agent"],
@@ -53,8 +66,12 @@ class TokenTracker:
         self.tracking_file.parent.mkdir(parents=True, exist_ok=True)
         
         if not self.tracking_file.exists():
+            # Get all valid tier names (excluding special keys)
+            tier_names = [name for name, info in self.model_tiers.items() 
+                         if isinstance(info, dict) and name != "tier_order"]
+            
             initial_data = {
-                "last_update": self._get_current_date(),
+                "last_update": self._get_current_datetime(),
                 "daily": {
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
@@ -70,7 +87,7 @@ class TokenTracker:
                         "daily_tokens": 0,
                         "lifetime_tokens": 0
                     }
-                    for tier_name in self.model_tiers.keys()
+                    for tier_name in tier_names
                 },
                 "models": {},
             }
@@ -88,46 +105,70 @@ class TokenTracker:
     
     def _reset_daily_counts(self, data: Dict) -> Dict:
         """Reset daily token counts while preserving lifetime counts."""
-        data["last_update"] = self._get_current_date()
-        data["daily"] = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0
-        }
-        # Reset daily counts for model groups
-        for group in data["model_groups"]:
-            data["model_groups"][group]["daily_tokens"] = 0
-        # Reset daily counts for individual models
-        for model in data["models"]:
-            data["models"][model]["daily_tokens"] = 0
+        # Parse the last update time
+        last_update = datetime.fromisoformat(data["last_update"])
+        current_time = datetime.now(self.timezone)
+        
+        # Only reset if the dates are different in the configured timezone
+        if last_update.astimezone(self.timezone).date() != current_time.date():
+            log.info(f"Resetting daily counts (last update: {last_update}, current time: {current_time})")
+            data["last_update"] = self._get_current_datetime()
+            
+            # Reset token counts
+            data["daily"] = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            }
+            
+            # Reset daily counts for model groups
+            for group in data["model_groups"]:
+                data["model_groups"][group]["daily_tokens"] = 0
+            
+            # Reset daily counts for individual models
+            for model in data["models"]:
+                data["models"][model]["daily_tokens"] = 0
+            
+            # Reset Gemini request tracking
+            if "request_tracking" in data and "gemini" in data["request_tracking"]:
+                data["request_tracking"]["gemini"]["daily"] = {
+                    "count": 0,
+                    "last_update": self._get_current_datetime()
+                }
+                # Also reset minute tracking at day boundary
+                data["request_tracking"]["gemini"]["minute"] = {
+                    "count": 0,
+                    "timestamp": self._get_current_datetime()
+                }
+                log.info("Reset Gemini request tracking counts")
+        
         return data
     
     def check_limit(self, model: str, tokens: int) -> bool:
-        """
-        Check if adding these tokens would exceed the daily limit for the model's group.
+        """Check if adding tokens would exceed daily limit."""
+        # For Gemini models, we don't check token limits
+        if model.startswith("gemini/"):
+            return False  # Let check_request_limit handle Gemini limits
         
-        Args:
-            model: The model being used
-            tokens: Number of tokens to be added
-            
-        Returns:
-            bool: True if adding these tokens would exceed the limit
-        """
-        try:
-            group_name, limit = self._get_model_group(model)
-        except ValueError as e:
-            log.warning(f"No limit configured for model {model} - allowing usage")
-            return False
-            
+        group_name, limit = self._get_model_group(model)
         data = self._load_data()
-        current = data["model_groups"][group_name]["daily_tokens"]
         
-        would_exceed = (current + tokens) > limit
-        if would_exceed:
+        # Initialize group if it doesn't exist
+        if group_name not in data["model_groups"]:
+            data["model_groups"][group_name] = {
+                "daily_tokens": 0,
+                "lifetime_tokens": 0
+            }
+            self._save_data(data)
+        
+        current_usage = data["model_groups"][group_name]["daily_tokens"]
+        
+        if current_usage + tokens > limit:
             log.error(f"⚠️  Adding {tokens} tokens would exceed daily limit of {limit} for group {group_name}")
-            log.error(f"Current group usage: {current} tokens")
-            log.error(f"This affects models: {', '.join(self.model_tiers[group_name]['models'])}")
-        return would_exceed
+            log.error(f"Current group usage: {current_usage} tokens")
+            return True
+        
+        return False
     
     def _get_provider_from_model(self, model: str) -> str:
         """Extract provider from model string"""
@@ -145,48 +186,76 @@ class TokenTracker:
         """
         if not self.auto_switch:
             return None
+        
+        # Find current tier
+        current_tier = None
+        for tier_name, tier_info in self.model_tiers.items():
+            if tier_name in ["tier_order"]:  # Skip non-tier keys
+                continue
+            if current_model in [
+                tier_info["architect_agent"],
+                tier_info["user_agent"],
+                tier_info["system_agent"],
+                tier_info["submission_model"]
+            ]:
+                current_tier = tier_name
+                break
             
-        current_provider = self._get_provider_from_model(current_model)
+        if not current_tier:
+            return None
+        
         data = self._load_data()
         
-        # Try providers in priority order
-        for provider in self.providers_to_use:
-            # Skip until we get to next provider after current
-            if provider == current_provider:
+        # Try tiers in priority order
+        found_current = False
+        for tier_name in self.tier_order:
+            # Skip tiers until we find current one
+            if tier_name == current_tier:
+                found_current = True
                 continue
-                
-            # Find models for this provider
-            available_models = []
-            for group_name, group_info in self.model_tiers.items():
-                for model in group_info["models"]:
-                    if model.startswith(f"{provider}/"):
-                        # Check if model has tokens available
-                        group_usage = data["model_groups"][group_name]["daily_tokens"]
-                        if group_usage < group_info["daily_token_limit"]:
-                            available_models.append(model)
-                            
-            if available_models:
-                return available_models[0]  # Return first available model
-                
+            if not found_current:
+                continue
+            
+            tier_info = self.model_tiers.get(tier_name)
+            if not tier_info or not tier_info.get("enabled", True):
+                continue
+            
+            # Check if tier has available capacity
+            group_usage = data["model_groups"].get(tier_name, {"daily_tokens": 0})["daily_tokens"]
+            limit = tier_info.get("daily_token_limit", tier_info.get("daily_request_limit", 0))
+            
+            if group_usage < limit:
+                return tier_info["system_agent"]  # Return the system agent model from this tier
+            
         return None
 
-    def track_usage(
-        self,
-        model: str,
-        prompt_tokens: int,
-        completion_tokens: int,
-    ) -> None:
+    def track_usage(self, model: str, prompt_tokens: int, completion_tokens: int) -> None:
         """Track token usage for an AI call."""
         data = self._load_data()
         
         # Check if we need to reset daily counts
-        current_date = self._get_current_date()
+        current_date = self._get_current_datetime()
         if data["last_update"] != current_date:
             data = self._reset_daily_counts(data)
         
         total_tokens = prompt_tokens + completion_tokens
         provider = self._get_provider_from_model(model)
         
+        # For Gemini, we only care about request counts, not tokens
+        if model.startswith("gemini/"):
+            # Track the request but don't add to token counts
+            self.track_request(model)
+            
+            # Enhanced logging for Gemini
+            log.info(f"\n📊 Request Usage (GEMINI):")
+            log.info(f"  Model: {model}")
+            request_data = data["request_tracking"]["gemini"]
+            log.info(f"  Daily requests: {request_data['daily']['count']}")
+            log.info(f"  Minute requests: {request_data['minute']['count']}")
+            return
+        
+        # Rest of the token tracking logic for non-Gemini models...
+        # (keep existing token tracking code)
         # Update daily counts
         data["daily"]["prompt_tokens"] += prompt_tokens
         data["daily"]["completion_tokens"] += completion_tokens
@@ -288,7 +357,7 @@ class TokenTracker:
 
     def get_daily_requests(self, model: str) -> int:
         """Get number of requests made today for a model"""
-        today = self._get_current_date()
+        today = self._get_current_datetime()
         data = self._load_data()
         return data.get("request_tracking", {}).get("gemini", {}).get("daily", {}).get("count", 0)
 
@@ -300,11 +369,11 @@ class TokenTracker:
                 "gemini": {
                     "minute": {
                         "count": 0,
-                        "timestamp": self._get_current_minute()
+                        "timestamp": self._get_current_datetime()
                     },
                     "daily": {
                         "count": 0,
-                        "last_update": self._get_current_date()
+                        "last_update": self._get_current_datetime()
                     }
                 }
             }
@@ -322,36 +391,22 @@ class TokenTracker:
         data = self._load_data()
         request_data = data["request_tracking"]["gemini"]
         
-        # Check if we need to reset minute counter
-        current_minute = self._get_current_minute()
-        if current_minute != request_data["minute"]["timestamp"]:
-            request_data["minute"] = {
-                "count": 0,
-                "timestamp": current_minute
-            }
-        
-        # Check if we need to reset daily counter
-        current_date = self._get_current_date()
-        if current_date != request_data["daily"]["last_update"]:
-            request_data["daily"] = {
-                "count": 0,
-                "last_update": current_date
-            }
-        
-        # Get limits from config
-        group_name = next(name for name, info in self.model_tiers.items() 
-                         if model in info["models"])
-        limits = self.model_tiers[group_name]["request_limits"]
-        
-        # Check limits
-        if request_data["minute"]["count"] >= limits["requests_per_minute"]:
-            log.warning(f"⚠️  Gemini rate limit reached: {limits['requests_per_minute']} requests per minute")
-            return True
-            
-        if request_data["daily"]["count"] >= limits["requests_per_day"]:
-            log.error(f"❌ Gemini daily request limit reached: {limits['requests_per_day']} requests per day")
-            return True
-            
+        # Only check daily limit - let API handle minute-based rate limiting
+        for tier_name, tier_info in self.model_tiers.items():
+            if tier_name in ["tier_order"]:
+                continue
+            if not isinstance(tier_info, dict):
+                continue
+            if model in [tier_info.get("architect_agent"), tier_info.get("user_agent"), 
+                        tier_info.get("system_agent"), tier_info.get("submission_model")]:
+                
+                # Only check daily limit
+                if request_data["daily"]["count"] >= tier_info.get("daily_request_limit", 0):
+                    log.error(f"❌ Gemini daily request limit reached ({request_data['daily']['count']}/{tier_info.get('daily_request_limit')} requests)")
+                    return True
+                
+                return False
+                
         return False
         
     def track_request(self, model: str) -> None:
@@ -362,9 +417,7 @@ class TokenTracker:
         data = self._load_data()
         request_data = data["request_tracking"]["gemini"]
         
-        # Update minute counter
-        request_data["minute"]["count"] += 1
-        # Update daily counter
+        # Only track daily count
         request_data["daily"]["count"] += 1
         
         self._save_data(data)
@@ -373,6 +426,16 @@ class TokenTracker:
         """Get daily token usage for a model"""
         data = self._load_data()
         return data.get("models", {}).get(model, {}).get("daily_tokens", 0)
+
+    def switch_tier(self, new_tier: str) -> None:
+        """Switch to a new model tier"""
+        if new_tier in self.model_tiers and new_tier != "tier_order":
+            self.current_tier = new_tier
+            log.info(f"Switched to tier: {new_tier}")
+
+    def get_current_tier(self) -> str:
+        """Get the current model tier"""
+        return self.current_tier
 
 # Create a global instance (initialized with config in pipeline.py)
 tracker = None 

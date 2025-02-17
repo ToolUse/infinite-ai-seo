@@ -19,13 +19,14 @@ Maybe, I can't guarantee it, I'm sure these companies have data pipelines to cle
 5. ✨ Each conversation is evaluated by an LLM judge for quality and authenticity. Only conversations that score above 70 are submitted.
 6. 🔄 High-quality conversations continue with natural follow-up questions
 7. ⚡ The system automatically manages token limits and switches between different AI models as needed
+8. ⌛️ If all limits are hit, the pipeline will just wait 24 hours before it starts again, indefinitely if you don't stop it.
 
 ## Quick Start
 
 ### 1. Install dependencies:
 
 ```bash
-pip install -r pyproject.toml
+pip install -r requirements.txt
 ```
 
 ### 2. Set up environment variables:
@@ -49,13 +50,16 @@ cp .env.template .env
 - `global.topic`: A short description of your product/service (used in prompts)
 - `global.overview`: Detailed description of your product/service and goals
 - `global.continue_conversation_for_n_messages`: Number of follow-up messages to generate in each conversation. 1 is the default.
+- `global.enable_infinite_mode`: Whether or not to run the pipeline indefinitely, meaning it reruns every 24 hours. Defaults to true!!
+- `model_tiers.[model_tier_name].daily_token_limit`: Set the daily token limit for the model tier. Defaults to 1,000,000 tokens a day for small models, which is around 0.38 cents a day with gpt-4o-mini. And 100,000 tokens a day for large models, which is around 0.63 cents a day with gpt-4o.
+- `model_tiers.[model_tier_name].enabled`: All enabled by default, you can disable any tier you'd like, if you want it to be fully free, disable the OpenAI tiers and just use Gemini.
 
 **Other optional settings:**
 
 **Model Configuration**
 
 - `model_tiers`: Configure different tiers of models with their own limits
-  - `providers_to_use`: List of providers to use. Currently only `openai` and `gemini` are supported. Remove a provider if you don't want it to be used.
+  - `tier_order`: List of providers to use and the order they run in. Currently only `openai` and `gemini` are supported. 'large models' and 'mini models' are for openAI. Remove a provider if you don't want it to be used.
   - `enabled`: Toggle specific tiers on/off
   - `daily_token_limit`: Daily token limit for OpenAI models
   - `daily_request_limit`: Daily request limit for Gemini models
@@ -83,7 +87,7 @@ cp .env.template .env
 ```bash
 python main.py index  # Index the context files if you have them
 python main.py run  # Generate conversations
-python main.py reindex  # Reindex the context files if you add more
+python main.py reindex  # Reindex the context files if you add more or update them
 ```
 
 ## Setting up API keys
@@ -131,6 +135,8 @@ For Google:
 - You may want to tweak the `src/context_manager.py` file to optimize it for your needs, it is a very simple RAG implementation, but it works. Chunk size, chunk overlap,
 
 - You could use two different API keys for generating conversations and submitting them. I don't think this matters too much, but if you wanted it to be 'pure', where only the generated conversations are submitted, you could do that.
+
+- If you really wanted to go through tokens, you could probably modify this repo so that it rotates through gemini models after it runs out of requests for one model. I don't have this set up, but it shouldn't be too difficult to add.
 
 ## FAQ
 
