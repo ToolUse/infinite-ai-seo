@@ -1,6 +1,6 @@
 # Infinite AI SEO
 
-> 📰 **[Antetic Daily Intelligence](https://anetic.co)** - Get AI news personalized to your interests, delivered daily.
+> 📰 **[Anetic Daily Intelligence](https://anetic.co)** - Get AI news personalized to your interests, delivered daily.
 
 
 ![Infinite AI SEO](assets/demo.gif)
