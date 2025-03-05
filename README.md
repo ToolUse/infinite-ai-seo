@@ -1,5 +1,8 @@
 # Infinite AI SEO
 
+> 📰 **[Antetic Daily Intelligence](https://anetic.co)** - Get AI news personalized to your interests, delivered daily.
+
+
 ![Infinite AI SEO](assets/demo.gif)
 
 Frontier model providers want your data to train their models on. Let's give them the data that **you** want them to have. The idea behind Infinite AI SEO is to continuously generate high-quality conversations about your product or service grounded in your data, that can be used to train the next generation of LLMs. Google provides daily free tokens in exchange for your data, and for OpenAI, it's incredibly cheap with GPT-4o-mini. Why not manufacture millions of tokens worth of simulated conversations of 'users' raving about your product every single day?
